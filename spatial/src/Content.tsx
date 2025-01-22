@@ -29,10 +29,14 @@ import {
   LinesAtom,
   ActiveColorAtom,
   VideoRefAtom,
+  ModelSelectedAtom,
 } from "./atoms";
 import { getSvgPathFromStroke } from "./utils";
 import { lineOptions } from "./consts";
 import { ResizePayload, useResizeDetector } from "react-resize-detector";
+import {GoogleGenerativeAI} from "@google/generative-ai";
+
+const client = new GoogleGenerativeAI(import.meta.env.VITE_GEMINI_API_KEY);
 
 export function Content() {
   const [imageSrc] = useAtom(ImageSrcAtom);
@@ -56,6 +60,8 @@ export function Content() {
   const [showItemList, setShowItemList] = useState(false);
   const [lastResponse, setLastResponse] = useState<any>(null);
   const [activeItems, setActiveItems] = useState<Set<string>>(new Set());
+  const [relatedItems, setRelatedItems] = useState<{[key: string]: string[]}>({});
+  const [modelSelected] = useAtom(ModelSelectedAtom);
 
   // Handling resize and aspect ratios
   const boundingBoxContainerRef = useRef<HTMLDivElement | null>(null);
@@ -311,33 +317,104 @@ export function Content() {
     return Array.from(new Set(lastResponse.map((item: any) => item.label))).sort() as string[];
   }, [lastResponse]);
 
+  // Function to analyze related objects
+  const analyzeRelatedObjects = async (item: string) => {
+    try {
+      const result = await client
+        .getGenerativeModel(
+          {model: modelSelected},
+          {apiVersion: 'v1beta'}
+        )
+        .generateContent({
+          contents: [{
+            role: "user",
+            parts: [{
+              text: `Given this ${item} in the current scene, list the most related objects that are present in the scene from this list: ${getItemList.join(", ")}. Output a JSON array where each entry is just the object name as a string. Consider spatial relationships, functional relationships, and common usage patterns. Example format: ["object1", "object2", "object3"]. Do not include explanations, just the JSON array.`
+            }]
+          }]
+        });
+      
+      const text = await result.response.text();
+      console.log('Related items response:', text);
+      
+      // Parse JSON response
+      let relatedObjects: string[] = [];
+      try {
+        // Extract JSON if it's wrapped in markdown code blocks
+        const jsonText = text.includes('```') ? 
+          text.split('```json')[1]?.split('```')[0] || text :
+          text;
+        relatedObjects = JSON.parse(jsonText)
+          .filter((item: string) => getItemList.includes(item));
+      } catch (e) {
+        console.error('Error parsing related items JSON:', e);
+        // Fallback to old text parsing if JSON parse fails
+        relatedObjects = text
+          .split(/[,\n]/)
+          .map(item => item.trim())
+          .filter(item => getItemList.includes(item));
+      }
+      
+      console.log('Filtered related objects:', relatedObjects);
+      
+      setRelatedItems(prev => ({
+        ...prev,
+        [item]: relatedObjects
+      }));
+    } catch (error) {
+      console.error('Error analyzing related objects:', error);
+    }
+  };
+
   return (
     <div ref={containerRef} className="w-full grow relative">
       {/* Always visible item list */}
       <div className="absolute left-4 top-4 z-10 bg-white border border-gray-200 rounded-lg shadow-lg p-4 min-w-[200px]">
         <div className="font-medium mb-2">Detected Items ({getItemList.length}):</div>
         <ul className="list-disc pl-5">
-          {getItemList.map((item) => (
-            <li 
-              key={item} 
-              className={`text-sm cursor-pointer hover:text-[#3B68FF] transition-colors ${
-                activeItems.has(item) ? "text-[#3B68FF] font-medium" : ""
-              }`}
-              onClick={() => {
-                setActiveItems(prev => {
-                  const newSet = new Set(prev);
-                  if (newSet.has(item)) {
-                    newSet.delete(item);
-                  } else {
-                    newSet.add(item);
-                  }
-                  return newSet;
-                });
-              }}
-            >
-              {item}
-            </li>
-          ))}
+          {getItemList.map((item) => {
+            const isActive = activeItems.has(item);
+            const isRelated = Object.entries(relatedItems).some(([activeItem, related]) => 
+              activeItems.has(activeItem) && related.includes(item)
+            );
+            
+            return (
+              <li key={item}>
+                <div 
+                  className={`text-sm cursor-pointer transition-colors ${
+                    isActive ? "text-[#3B68FF] font-medium" : 
+                    isRelated ? "text-[#22c55e] font-medium" : ""
+                  } hover:text-[#3B68FF]`}
+                  onClick={() => {
+                    setActiveItems(prev => {
+                      const newSet = new Set(prev);
+                      if (newSet.has(item)) {
+                        newSet.delete(item);
+                        // Clear related items when deactivated
+                        setRelatedItems(prev => {
+                          const newRelated = { ...prev };
+                          delete newRelated[item];
+                          return newRelated;
+                        });
+                      } else {
+                        newSet.add(item);
+                        // Analyze related objects when activated
+                        analyzeRelatedObjects(item);
+                      }
+                      return newSet;
+                    });
+                  }}
+                >
+                  {item}
+                  {relatedItems[item] && relatedItems[item].length > 0 && (
+                    <div className="ml-4 mt-1 text-xs text-gray-600">
+                      Related: {relatedItems[item].join(", ")}
+                    </div>
+                  )}
+                </div>
+              </li>
+            );
+          })}
         </ul>
       </div>
 
@@ -492,48 +569,63 @@ export function Content() {
           </svg>
         )}
         {detectType === "2D bounding boxes" &&
-          boundingBoxes2D.map((box, i) => (
-            <div key={i}>
-              {showBboxes && (
-                <div
-                  className={`absolute bbox border-2 ${
-                    activeItems.has(box.label) ? "border-[#ff3b3b]" : "border-[#3B68FF]"
-                  } ${i === hoveredBox ? "reveal" : ""}`}
-                  style={{
-                    transformOrigin: "0 0",
-                    top: box.y * 100 + "%",
-                    left: box.x * 100 + "%",
-                    width: box.width * 100 + "%",
-                    height: box.height * 100 + "%",
-                  }}
-                >
-                  <div className={`${
-                    activeItems.has(box.label) ? "bg-[#ff3b3b]" : "bg-[#3B68FF]"
-                  } text-white absolute left-0 top-0 text-sm px-1`}>
-                    {box.label}
+          boundingBoxes2D.map((box, i) => {
+            const isActive = activeItems.has(box.label);
+            const isRelated = Object.entries(relatedItems).some(([activeItem, related]) => 
+              activeItems.has(activeItem) && related.includes(box.label)
+            );
+            
+            return (
+              <div key={i}>
+                {showBboxes && (
+                  <div
+                    className={`absolute bbox border-2 ${
+                      isActive ? "border-[#ff3b3b]" : 
+                      isRelated ? "border-[#22c55e]" :
+                      "border-[#3B68FF]"
+                    } ${i === hoveredBox ? "reveal" : ""}`}
+                    style={{
+                      transformOrigin: "0 0",
+                      top: box.y * 100 + "%",
+                      left: box.x * 100 + "%",
+                      width: box.width * 100 + "%",
+                      height: box.height * 100 + "%",
+                    }}
+                  >
+                    <div className={`${
+                      isActive ? "bg-[#ff3b3b]" : 
+                      isRelated ? "bg-[#22c55e]" :
+                      "bg-[#3B68FF]"
+                    } text-white absolute left-0 top-0 text-sm px-1`}>
+                      {box.label}
+                    </div>
                   </div>
-                </div>
-              )}
-              {showPoints && (
-                <div
-                  className="absolute bg-red"
-                  style={{
-                    left: `${(box.x + box.width/2) * 100}%`,
-                    top: `${(box.y + box.height/2) * 100}%`,
-                  }}
-                >
-                  <div className={`absolute ${
-                    activeItems.has(box.label) ? "bg-[#ff3b3b]" : "bg-[#3B68FF]"
-                  } text-center text-white text-xs px-1 bottom-4 rounded-sm -translate-x-1/2 left-1/2`}>
-                    {box.label}
+                )}
+                {showPoints && (
+                  <div
+                    className="absolute bg-red"
+                    style={{
+                      left: `${(box.x + box.width/2) * 100}%`,
+                      top: `${(box.y + box.height/2) * 100}%`,
+                    }}
+                  >
+                    <div className={`absolute ${
+                      isActive ? "bg-[#ff3b3b]" : 
+                      isRelated ? "bg-[#22c55e]" :
+                      "bg-[#3B68FF]"
+                    } text-center text-white text-xs px-1 bottom-4 rounded-sm -translate-x-1/2 left-1/2`}>
+                      {box.label}
+                    </div>
+                    <div className={`absolute w-4 h-4 ${
+                      isActive ? "bg-[#ff3b3b]" : 
+                      isRelated ? "bg-[#22c55e]" :
+                      "bg-[#3B68FF]"
+                    } rounded-full border-white border-[2px] -translate-x-1/2 -translate-y-1/2`}></div>
                   </div>
-                  <div className={`absolute w-4 h-4 ${
-                    activeItems.has(box.label) ? "bg-[#ff3b3b]" : "bg-[#3B68FF]"
-                  } rounded-full border-white border-[2px] -translate-x-1/2 -translate-y-1/2`}></div>
-                </div>
-              )}
-            </div>
-          ))}
+                )}
+              </div>
+            );
+          })}
         {detectType === "Points" &&
           points.map((point, i) => {
             return (
