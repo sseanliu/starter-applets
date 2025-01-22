@@ -93,7 +93,7 @@ export function ExtraModeControls() {
               }}
             >
               <div className="text-xs">🔴</div>
-              <div className="whitespace-nowrap">Stop screenshare</div>
+              <div className="whitespace-nowrap">Stop {stream.getVideoTracks()[0].kind === 'video' ? 'webcam' : 'screenshare'}</div>
             </button>
           ) : null}
           {detectType === "3D bounding boxes" ? (

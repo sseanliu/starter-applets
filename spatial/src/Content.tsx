@@ -14,7 +14,7 @@
 
 import { useAtom } from "jotai";
 import getStroke from "perfect-freehand";
-import { useState, useRef, useMemo, useCallback } from "react";
+import { useState, useRef, useMemo, useCallback, useEffect } from "react";
 import {
   ImageSrcAtom,
   BoundingBoxes2DAtom,
@@ -50,6 +50,12 @@ export function Content() {
   const [drawMode] = useAtom(DrawModeAtom);
   const [lines, setLines] = useAtom(LinesAtom);
   const [activeColor] = useAtom(ActiveColorAtom);
+  const [isWebcam, setIsWebcam] = useState(false);
+  const [showBboxes, setShowBboxes] = useState(true);
+  const [showPoints, setShowPoints] = useState(true);
+  const [showItemList, setShowItemList] = useState(false);
+  const [lastResponse, setLastResponse] = useState<any>(null);
+  const [activeItems, setActiveItems] = useState<Set<string>>(new Set());
 
   // Handling resize and aspect ratios
   const boundingBoxContainerRef = useRef<HTMLDivElement | null>(null);
@@ -280,12 +286,84 @@ export function Content() {
 
   const downRef = useRef<Boolean>(false);
 
+  useEffect(() => {
+    if (stream) {
+      setIsWebcam(stream.getVideoTracks()[0].kind === 'video');
+    } else {
+      setIsWebcam(false);
+    }
+  }, [stream]);
+
+  // Subscribe to response updates from Prompt component
+  useEffect(() => {
+    const handleResponse = (event: CustomEvent) => {
+      setLastResponse(event.detail);
+    };
+    window.addEventListener('parsedResponse', handleResponse as EventListener);
+    return () => {
+      window.removeEventListener('parsedResponse', handleResponse as EventListener);
+    };
+  }, []);
+
+  // Get unique item names from the response
+  const getItemList = useMemo(() => {
+    if (!lastResponse) return [] as string[];
+    return Array.from(new Set(lastResponse.map((item: any) => item.label))).sort() as string[];
+  }, [lastResponse]);
+
   return (
     <div ref={containerRef} className="w-full grow relative">
+      {/* Always visible item list */}
+      <div className="absolute left-4 top-4 z-10 bg-white border border-gray-200 rounded-lg shadow-lg p-4 min-w-[200px]">
+        <div className="font-medium mb-2">Detected Items ({getItemList.length}):</div>
+        <ul className="list-disc pl-5">
+          {getItemList.map((item) => (
+            <li 
+              key={item} 
+              className={`text-sm cursor-pointer hover:text-[#3B68FF] transition-colors ${
+                activeItems.has(item) ? "text-[#3B68FF] font-medium" : ""
+              }`}
+              onClick={() => {
+                setActiveItems(prev => {
+                  const newSet = new Set(prev);
+                  if (newSet.has(item)) {
+                    newSet.delete(item);
+                  } else {
+                    newSet.add(item);
+                  }
+                  return newSet;
+                });
+              }}
+            >
+              {item}
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      {/* Add toggle buttons when in 2D mode */}
+      {detectType === "2D bounding boxes" && boundingBoxes2D.length > 0 && (
+        <div className="absolute top-4 right-4 flex gap-2 z-10">
+          <button
+            className={`px-3 py-1 rounded text-sm ${showBboxes ? "bg-[#3B68FF] text-white" : "bg-gray-200 text-gray-700"}`}
+            onClick={() => setShowBboxes(!showBboxes)}
+          >
+            Boxes
+          </button>
+          <button
+            className={`px-3 py-1 rounded text-sm ${showPoints ? "bg-[#3B68FF] text-white" : "bg-gray-200 text-gray-700"}`}
+            onClick={() => setShowPoints(!showPoints)}
+          >
+            Points
+          </button>
+        </div>
+      )}
       {stream ? (
         <video
           className="absolute top-0 left-0 w-full h-full object-contain"
           autoPlay
+          playsInline
+          muted={isWebcam}
           onLoadedMetadata={(e) => {
             setActiveMediaDimensions({
               width: e.currentTarget.videoWidth,
@@ -415,20 +493,45 @@ export function Content() {
         )}
         {detectType === "2D bounding boxes" &&
           boundingBoxes2D.map((box, i) => (
-            <div
-              key={i}
-              className={`absolute bbox border-2 border-[#3B68FF] ${i === hoveredBox ? "reveal" : ""}`}
-              style={{
-                transformOrigin: "0 0",
-                top: box.y * 100 + "%",
-                left: box.x * 100 + "%",
-                width: box.width * 100 + "%",
-                height: box.height * 100 + "%",
-              }}
-            >
-              <div className="bg-[#3B68FF] text-white absolute left-0 top-0 text-sm px-1">
-                {box.label}
-              </div>
+            <div key={i}>
+              {showBboxes && (
+                <div
+                  className={`absolute bbox border-2 ${
+                    activeItems.has(box.label) ? "border-[#ff3b3b]" : "border-[#3B68FF]"
+                  } ${i === hoveredBox ? "reveal" : ""}`}
+                  style={{
+                    transformOrigin: "0 0",
+                    top: box.y * 100 + "%",
+                    left: box.x * 100 + "%",
+                    width: box.width * 100 + "%",
+                    height: box.height * 100 + "%",
+                  }}
+                >
+                  <div className={`${
+                    activeItems.has(box.label) ? "bg-[#ff3b3b]" : "bg-[#3B68FF]"
+                  } text-white absolute left-0 top-0 text-sm px-1`}>
+                    {box.label}
+                  </div>
+                </div>
+              )}
+              {showPoints && (
+                <div
+                  className="absolute bg-red"
+                  style={{
+                    left: `${(box.x + box.width/2) * 100}%`,
+                    top: `${(box.y + box.height/2) * 100}%`,
+                  }}
+                >
+                  <div className={`absolute ${
+                    activeItems.has(box.label) ? "bg-[#ff3b3b]" : "bg-[#3B68FF]"
+                  } text-center text-white text-xs px-1 bottom-4 rounded-sm -translate-x-1/2 left-1/2`}>
+                    {box.label}
+                  </div>
+                  <div className={`absolute w-4 h-4 ${
+                    activeItems.has(box.label) ? "bg-[#ff3b3b]" : "bg-[#3B68FF]"
+                  } rounded-full border-white border-[2px] -translate-x-1/2 -translate-y-1/2`}></div>
+                </div>
+              )}
             </div>
           ))}
         {detectType === "Points" &&

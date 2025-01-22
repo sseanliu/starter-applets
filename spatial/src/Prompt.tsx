@@ -32,7 +32,7 @@ import {
 } from "./atoms";
 import { lineOptions } from "./consts.js";
 import { getSvgPathFromStroke, loadImage } from "./utils";
-import {  useState } from "react";
+import {  useState, useEffect, useRef } from "react";
 
 const client = new GoogleGenerativeAI(import.meta.env.VITE_GEMINI_API_KEY);
 
@@ -56,6 +56,25 @@ export function Prompt() {
   const [prompts, setPrompts] = useAtom(PromptsAtom);
   const [customPrompts, setCustomPrompts] = useAtom(CustomPromptsAtom);
 
+  const [analyzeInterval, setAnalyzeInterval] = useState(1);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const analyzeIntervalRef = useRef<number | null>(null);
+  const isWebcam = stream?.getVideoTracks()[0]?.kind === 'video';
+
+  useEffect(() => {
+    return () => {
+      if (analyzeIntervalRef.current) {
+        clearInterval(analyzeIntervalRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isAnalyzing && analyzeIntervalRef.current) {
+      clearInterval(analyzeIntervalRef.current);
+      analyzeIntervalRef.current = null;
+    }
+  }, [isAnalyzing]);
 
   const is2d = detectType === "2D bounding boxes";
 
@@ -67,13 +86,26 @@ export function Prompt() {
     } in "label".`
 
   async function handleSend() {
+    if (isWebcam) {
+      if (isAnalyzing) {
+        setIsAnalyzing(false);
+        return;
+      }
+      setIsAnalyzing(true);
+      analyzeIntervalRef.current = window.setInterval(analyzeFrame, analyzeInterval * 1000) as unknown as number;
+      await analyzeFrame();
+    } else {
+      await analyzeFrame();
+    }
+  }
+
+  async function analyzeFrame() {
     let activeDataURL;
     const maxSize = 640;
     const copyCanvas = document.createElement("canvas");
     const ctx = copyCanvas.getContext("2d")!;
 
     if (stream) {
-      // screenshare
       const video = videoRef.current!;
       const scale = Math.min(
         maxSize / video.videoWidth,
@@ -93,9 +125,11 @@ export function Prompt() {
       const scale = Math.min(maxSize / image.width, maxSize / image.height);
       copyCanvas.width = image.width * scale;
       copyCanvas.height = image.height * scale;
-      console.log(copyCanvas)
       ctx.drawImage(image, 0, 0, image.width * scale, image.height * scale);
     }
+
+    console.log('Canvas size:', { width: copyCanvas.width, height: copyCanvas.height });
+    
     activeDataURL = copyCanvas.toDataURL("image/png");
 
     if (lines.length > 0) {
@@ -147,6 +181,11 @@ export function Prompt() {
       response = response.split("```json")[1].split("```")[0];
     }
     const parsedResponse = JSON.parse(response);
+    console.log('Parsed response:', parsedResponse);
+    
+    // Dispatch parsed response event
+    window.dispatchEvent(new CustomEvent('parsedResponse', { detail: parsedResponse }));
+
     if (detectType === "2D bounding boxes") {
       const formattedBoxes = parsedResponse.map(
         (box: { box_2d: [number, number, number, number]; label: string }) => {
@@ -290,9 +329,27 @@ export function Prompt() {
         )}
       </div>
       <div className="flex justify-between gap-3">
-        <button className="bg-[#3B68FF] px-12 !text-white !border-none" onClick={handleSend}>
-          Send
-        </button>
+        <div className="flex items-center gap-3">
+          <button 
+            className={`${isAnalyzing ? "bg-red-500" : "bg-[#3B68FF]"} px-12 !text-white !border-none`} 
+            onClick={handleSend}
+          >
+            {isWebcam ? (isAnalyzing ? "Stop" : "Start") : "Send"}
+          </button>
+          {isWebcam && (
+            <div className="flex items-center gap-2">
+              <label className="whitespace-nowrap">Interval (s):</label>
+              <input
+                type="number"
+                min="0.1"
+                step="0.1"
+                value={analyzeInterval}
+                onChange={(e) => setAnalyzeInterval(Math.max(0.1, Number(e.target.value)))}
+                className="w-16 px-2 py-1 bg-[var(--input-color)] rounded"
+              />
+            </div>
+          )}
+        </div>
         <label className="flex items-center gap-2">
           temperature:
           <input

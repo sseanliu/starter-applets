@@ -21,6 +21,7 @@ import {
   BumpSessionAtom,
 } from "./atoms";
 import { ScreenshareButton } from "./ScreenshareButton";
+import { WebcamButton } from "./WebcamButton";
 import { useResetState } from "./hooks";
 
 export function SideControls() {
@@ -55,7 +56,7 @@ export function SideControls() {
         />
         <div>Upload an image</div>
       </label>
-      <div className="hidden">
+      <div className="flex flex-col gap-3">
         <button
           className="button flex gap-3 justify-center items-center"
           onClick={() => {
@@ -65,6 +66,7 @@ export function SideControls() {
           <div className="text-lg"> 🎨</div>
           <div>Draw on image</div>
         </button>
+        <WebcamButton />
         <ScreenshareButton />
       </div>
     </div>
