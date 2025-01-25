@@ -38,7 +38,7 @@ import {GoogleGenerativeAI} from "@google/generative-ai";
 
 const client = new GoogleGenerativeAI(import.meta.env.VITE_GEMINI_API_KEY);
 
-export function Content() {
+export function Content({ sceneContext }: { sceneContext: { scene: string; task: string; } | null }) {
   const [imageSrc] = useAtom(ImageSrcAtom);
   const [boundingBoxes2D] = useAtom(BoundingBoxes2DAtom);
   const [boundingBoxes3D] = useAtom(BoundingBoxes3DAtom);
@@ -60,7 +60,7 @@ export function Content() {
   const [showItemList, setShowItemList] = useState(false);
   const [lastResponse, setLastResponse] = useState<any>(null);
   const [activeItems, setActiveItems] = useState<Set<string>>(new Set());
-  const [relatedItems, setRelatedItems] = useState<{[key: string]: string[]}>({});
+  const [relatedItems, setRelatedItems] = useState<{[key: string]: {[key: string]: string}}>({});
   const [modelSelected] = useAtom(ModelSelectedAtom);
 
   // Handling resize and aspect ratios
@@ -320,6 +320,27 @@ export function Content() {
   // Function to analyze related objects
   const analyzeRelatedObjects = async (item: string) => {
     try {
+      const prompt = `Given this scene context: "${sceneContext?.scene || 'Unknown scene'}",
+        the potential task: "${sceneContext?.task || 'Unknown task'}",
+        and that the user is holding the ${item},
+
+        Find objects that are most related to this ${item} in the current scene, considering:
+        1. The overall scene context and task
+        2. Spatial relationships
+        3. Functional relationships in the context of the task
+        4. Common usage patterns
+
+        Choose only from these detected items: ${getItemList.join(", ")}
+
+        Output a JSON object where each key is a related object and its value is a brief relationship description (max 5 words).
+        Example format: {
+          "object1": "used together for cooking",
+          "object2": "located next to item",
+          "object3": "complements main task"
+        }`;
+
+      console.log('Sending prompt:', prompt);
+
       const result = await client
         .getGenerativeModel(
           {model: modelSelected},
@@ -329,30 +350,29 @@ export function Content() {
           contents: [{
             role: "user",
             parts: [{
-              text: `Given this ${item} in the current scene, list the most related objects that are present in the scene from this list: ${getItemList.join(", ")}. Output a JSON array where each entry is just the object name as a string. Consider spatial relationships, functional relationships, and common usage patterns. Example format: ["object1", "object2", "object3"]. Do not include explanations, just the JSON array.`
+              text: prompt
             }]
           }]
         });
       
-      const text = await result.response.text();
-      console.log('Related items response:', text);
+      const responseText = await result.response.text();
+      console.log('Related items response:', responseText);
       
       // Parse JSON response
-      let relatedObjects: string[] = [];
+      let relatedObjects: {[key: string]: string} = {};
       try {
         // Extract JSON if it's wrapped in markdown code blocks
-        const jsonText = text.includes('```') ? 
-          text.split('```json')[1]?.split('```')[0] || text :
-          text;
-        relatedObjects = JSON.parse(jsonText)
-          .filter((item: string) => getItemList.includes(item));
+        const jsonText = responseText.includes('```') ? 
+          responseText.substring(responseText.indexOf('```json') + 7, responseText.lastIndexOf('```')).trim() :
+          responseText;
+        relatedObjects = JSON.parse(jsonText);
+        // Filter to only include items from getItemList
+        relatedObjects = Object.fromEntries(
+          Object.entries(relatedObjects)
+            .filter(([item]) => getItemList.includes(item))
+        );
       } catch (e) {
         console.error('Error parsing related items JSON:', e);
-        // Fallback to old text parsing if JSON parse fails
-        relatedObjects = text
-          .split(/[,\n]/)
-          .map(item => item.trim())
-          .filter(item => getItemList.includes(item));
       }
       
       console.log('Filtered related objects:', relatedObjects);
@@ -368,15 +388,23 @@ export function Content() {
 
   return (
     <div ref={containerRef} className="w-full grow relative">
-      {/* Always visible item list */}
-      <div className="absolute left-4 top-4 z-10 bg-white border border-gray-200 rounded-lg shadow-lg p-4 min-w-[200px]">
+      {/* Detected items list */}
+      <div className="absolute left-4 top-4 z-10 bg-white border border-gray-200 rounded-lg shadow-lg p-4 w-[200px]">
         <div className="font-medium mb-2">Detected Items ({getItemList.length}):</div>
         <ul className="list-disc pl-5">
           {getItemList.map((item) => {
             const isActive = activeItems.has(item);
             const isRelated = Object.entries(relatedItems).some(([activeItem, related]) => 
-              activeItems.has(activeItem) && related.includes(item)
+              activeItems.has(activeItem) && related.hasOwnProperty(item)
             );
+            
+            // Find relationship text if item is related
+            const relationship = Object.entries(relatedItems).reduce((acc, [activeItem, related]) => {
+              if (activeItems.has(activeItem) && related[item]) {
+                return related[item];
+              }
+              return acc;
+            }, '');
             
             return (
               <li key={item}>
@@ -406,10 +434,10 @@ export function Content() {
                   }}
                 >
                   {item}
-                  {relatedItems[item] && relatedItems[item].length > 0 && (
-                    <div className="ml-4 mt-1 text-xs text-gray-600">
-                      Related: {relatedItems[item].join(", ")}
-                    </div>
+                  {isRelated && relationship && (
+                    <span className="ml-2 text-xs text-gray-500">
+                      ({relationship})
+                    </span>
                   )}
                 </div>
               </li>
@@ -568,11 +596,95 @@ export function Content() {
             ))}
           </svg>
         )}
+
+        {/* Relationship Lines */}
+        <svg
+          className="absolute top-0 left-0 w-full h-full pointer-events-none"
+          style={{
+            width: boundingBoxContainer?.width,
+            height: boundingBoxContainer?.height,
+            opacity: hoverEntered ? 1 : 0,
+            transition: 'opacity 0.2s ease-in-out',
+            zIndex: 20
+          }}
+        >
+          {Object.entries(relatedItems).map(([activeItem, related]) => {
+            if (!activeItems.has(activeItem)) return null;
+            
+            // Find the active box
+            const activeBox = boundingBoxes2D.find(box => box.label === activeItem);
+            if (!activeBox) return null;
+            
+            const activeCenter = {
+              x: (activeBox.x + activeBox.width/2) * boundingBoxContainer!.width,
+              y: (activeBox.y + activeBox.height/2) * boundingBoxContainer!.height
+            };
+
+            return Object.entries(related).map(([relatedItem, relationship]) => {
+              const relatedBox = boundingBoxes2D.find(box => box.label === relatedItem);
+              if (!relatedBox) return null;
+
+              const relatedCenter = {
+                x: (relatedBox.x + relatedBox.width/2) * boundingBoxContainer!.width,
+                y: (relatedBox.y + relatedBox.height/2) * boundingBoxContainer!.height
+              };
+
+              // Calculate midpoint for label
+              const midX = (activeCenter.x + relatedCenter.x) / 2;
+              const midY = (activeCenter.y + relatedCenter.y) / 2;
+
+              const showLabel = hoveredBox !== null && (
+                boundingBoxes2D[hoveredBox].label === activeItem ||
+                boundingBoxes2D[hoveredBox].label === relatedItem
+              );
+
+              return (
+                <g key={`${activeItem}-${relatedItem}`}>
+                  <line
+                    x1={activeCenter.x}
+                    y1={activeCenter.y}
+                    x2={relatedCenter.x}
+                    y2={relatedCenter.y}
+                    stroke="#22c55e"
+                    strokeWidth="2"
+                    strokeDasharray="4"
+                  />
+                  {showLabel && (
+                    <>
+                      <rect
+                        x={midX}
+                        y={midY - 45}
+                        width={relationship.length * 5.5 + 12}
+                        height="16"
+                        fill="white"
+                        fillOpacity="0.8"
+                        stroke="#22c55e"
+                        strokeWidth="1"
+                        rx="4"
+                        transform={`translate(${-(relationship.length * 5.5 + 12) / 2}, 0)`}
+                      />
+                      <text
+                        x={midX}
+                        y={midY - 37}
+                        textAnchor="middle"
+                        dominantBaseline="middle"
+                        className="text-[8px] fill-gray-600 font-medium"
+                      >
+                        {relationship}
+                      </text>
+                    </>
+                  )}
+                </g>
+              );
+            });
+          })}
+        </svg>
+
         {detectType === "2D bounding boxes" &&
           boundingBoxes2D.map((box, i) => {
             const isActive = activeItems.has(box.label);
             const isRelated = Object.entries(relatedItems).some(([activeItem, related]) => 
-              activeItems.has(activeItem) && related.includes(box.label)
+              activeItems.has(activeItem) && related.hasOwnProperty(box.label)
             );
             
             return (
@@ -592,13 +704,13 @@ export function Content() {
                       height: box.height * 100 + "%",
                     }}
                   >
-                    <div className={`${
+                    {/* <div className={`${
                       isActive ? "bg-[#ff3b3b]" : 
                       isRelated ? "bg-[#22c55e]" :
                       "bg-[#3B68FF]"
-                    } text-white absolute left-0 top-0 text-sm px-1`}>
+                    } text-white absolute left-0 top-0 text-[8px] px-1`}>
                       {box.label}
-                    </div>
+                    </div> */}
                   </div>
                 )}
                 {showPoints && (
@@ -613,7 +725,7 @@ export function Content() {
                       isActive ? "bg-[#ff3b3b]" : 
                       isRelated ? "bg-[#22c55e]" :
                       "bg-[#3B68FF]"
-                    } text-center text-white text-xs px-1 bottom-4 rounded-sm -translate-x-1/2 left-1/2`}>
+                    } text-center text-white text-[8px] px-1 bottom-4 rounded-sm -translate-x-1/2 left-1/2`}>
                       {box.label}
                     </div>
                     <div className={`absolute w-4 h-4 ${

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { TopBar } from "./TopBar.js";
 import { Content } from "./Content.js";
 import { ExampleImages } from "./ExampleImages.js";
@@ -30,12 +30,13 @@ import { useResetState } from "./hooks.js";
 import { DetectTypeSelector } from "./DetectTypeSelector.js";
 import { safetySettings } from "./consts.js";
 
-function App() {
+export default function App() {
   const [, setImageSrc] = useAtom(ImageSrcAtom);
   const resetState = useResetState();
   const [initFinished, setInitFinished] = useAtom(InitFinishedAtom);
   const [, setBumpSession] = useAtom(BumpSessionAtom);
   const [, setIsUploadedImage] = useAtom(IsUploadedImageAtom);
+  const [sceneContext, setSceneContext] = useState<{ scene: string; task: string; } | null>(null);
 
   useEffect(() => {
     if (!window.matchMedia("(prefers-color-scheme: dark)").matches) {
@@ -47,7 +48,7 @@ function App() {
     <div className="flex flex-col h-[100dvh]">
       <div className="flex grow flex-col border-b overflow-hidden">
         <TopBar />
-        {initFinished ? <Content /> : null}
+        {initFinished ? <Content sceneContext={sceneContext} /> : null}
         <ExtraModeControls />
       </div>
       <div className="flex shrink-0 w-full overflow-auto py-6 px-5 gap-6 lg:items-start">
@@ -57,12 +58,9 @@ function App() {
         </div>
         <div className="flex flex-row gap-6 grow">
           <DetectTypeSelector />
-          <Prompt />
+          <Prompt onSceneContextChange={setSceneContext} />
         </div>
-
       </div>
     </div>
   );
 }
-
-export default App;

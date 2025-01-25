@@ -36,7 +36,11 @@ import {  useState, useEffect, useRef } from "react";
 
 const client = new GoogleGenerativeAI(import.meta.env.VITE_GEMINI_API_KEY);
 
-export function Prompt() {
+export function Prompt({ 
+  onSceneContextChange 
+}: { 
+  onSceneContextChange: (context: { scene: string; task: string; } | null) => void 
+}) {
   const [temperature, setTemperature] = useAtom(TemperatureAtom);
   const [, setBoundingBoxes2D] = useAtom(BoundingBoxes2DAtom);
   const [, setBoundingBoxes3D] = useAtom(BoundingBoxes3DAtom);
@@ -49,8 +53,8 @@ export function Prompt() {
   const [videoRef] = useAtom(VideoRefAtom);
   const [imageSrc] = useAtom(ImageSrcAtom);
   const [showCustomPrompt] = useState(false);
-  const [targetPrompt, setTargetPrompt] = useState("items");
-  const [labelPrompt, setLabelPrompt] = useState("");
+  const [targetPrompt, setTargetPrompt] = useState("SKU items");
+  const [labelPrompt, setLabelPrompt] = useState("a text label of their name indicating exactly what the item is (the product name).");
   const [showRawPrompt, setShowRawPrompt] = useState(false);
 
   const [prompts, setPrompts] = useAtom(PromptsAtom);
@@ -60,6 +64,13 @@ export function Prompt() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const analyzeIntervalRef = useRef<number | null>(null);
   const isWebcam = stream?.getVideoTracks()[0]?.kind === 'video';
+
+  const [sceneContext, setSceneContext] = useState<{scene: string, task: string} | null>(null);
+
+  // Update parent when scene context changes
+  useEffect(() => {
+    onSceneContextChange(sceneContext);
+  }, [sceneContext, onSceneContextChange]);
 
   useEffect(() => {
     return () => {
@@ -85,17 +96,138 @@ export function Prompt() {
       labelPrompt || 'a text label'
     } in "label".`
 
-  async function handleSend() {
-    if (isWebcam) {
-      if (isAnalyzing) {
-        setIsAnalyzing(false);
-        return;
+  async function analyzeSceneContext(activeDataURL: string) {
+    try {
+      const result = await client
+        .getGenerativeModel(
+          {model: modelSelected},
+          {apiVersion: 'v1beta'}
+        )
+        .generateContent({
+          contents: [{
+            role: "user",
+            parts: [
+              {text: "Based on this image, infer the scene context and potential task. Output in JSON format with exactly this structure: {\"scene\": \"description of the scene\", \"task\": \"reasoning about potential task\"}. Be concise."},
+              {inlineData: {
+                data: activeDataURL.replace("data:image/png;base64,", ""),
+                mimeType: "image/png"
+              }}
+            ]
+          }]
+        });
+      
+      const text = await result.response.text();
+      console.log('Scene context response:', text);
+      
+      try {
+        const jsonText = text.includes('```') ? 
+          text.split('```json')[1]?.split('```')[0] || text :
+          text;
+        const contextData = JSON.parse(jsonText);
+        setSceneContext(contextData);
+      } catch (e) {
+        console.error('Error parsing scene context JSON:', e);
       }
-      setIsAnalyzing(true);
-      analyzeIntervalRef.current = window.setInterval(analyzeFrame, analyzeInterval * 1000) as unknown as number;
-      await analyzeFrame();
-    } else {
-      await analyzeFrame();
+    } catch (error) {
+      console.error('Error analyzing scene context:', error);
+    }
+  }
+
+  async function analyzeDetection(activeDataURL: string) {
+    try {
+      const prompt = prompts[detectType];
+      setHoverEntered(false);
+
+      let response = (await client
+        .getGenerativeModel(
+          {model: modelSelected},
+          {apiVersion: 'v1beta'}
+        )
+        .generateContent({
+          contents: [
+            {
+              role: "user",
+              parts: [
+                {text: is2d ? get2dPrompt() : prompt.join(" ")},
+                {inlineData: {
+                  data: activeDataURL.replace("data:image/png;base64,", ""),
+                  mimeType: "image/png"
+                }}
+              ]
+            }
+          ],
+          generationConfig: {temperature}
+        })).response.text();
+
+      if (response.includes("```json")) {
+        response = response.split("```json")[1].split("```")[0];
+      }
+      const parsedResponse = JSON.parse(response);
+      console.log('Parsed response:', parsedResponse);
+      
+      window.dispatchEvent(new CustomEvent('parsedResponse', { detail: parsedResponse }));
+
+      if (detectType === "2D bounding boxes") {
+        const formattedBoxes = parsedResponse.map(
+          (box: { box_2d: [number, number, number, number]; label: string }) => {
+            const [ymin, xmin, ymax, xmax] = box.box_2d;
+            return {
+              x: xmin / 1000,
+              y: ymin / 1000,
+              width: (xmax - xmin) / 1000,
+              height: (ymax - ymin) / 1000,
+              label: box.label,
+            };
+          },
+        );
+        setHoverEntered(false);
+        setBoundingBoxes2D(formattedBoxes);
+      } else if (detectType === "Points") {
+        const formattedPoints = parsedResponse.map(
+          (point: { point: [number, number]; label: string }) => {
+            return {
+              point: {
+                x: point.point[1] / 1000,
+                y: point.point[0] / 1000,
+              },
+              label: point.label,
+            };
+          },
+        );
+        setPoints(formattedPoints);
+      } else {
+        const formattedBoxes = parsedResponse.map(
+          (box: {
+            box_3d: [
+              number,
+              number,
+              number,
+              number,
+              number,
+              number,
+              number,
+              number,
+              number,
+            ];
+            label: string;
+          }) => {
+            const center = box.box_3d.slice(0, 3);
+            const size = box.box_3d.slice(3, 6);
+            const rpy = box.box_3d
+              .slice(6)
+              .map((x: number) => (x * Math.PI) / 180);
+            return {
+              center,
+              size,
+              rpy,
+              label: box.label,
+            };
+          },
+        );
+        setBoundingBoxes3D(formattedBoxes);
+      }
+    } catch (error) {
+      console.error('Error in detection analysis:', error);
     }
   }
 
@@ -152,103 +284,37 @@ export function Prompt() {
       activeDataURL = copyCanvas.toDataURL("image/png");
     }
 
-    const prompt = prompts[detectType];
+    // Run both LLM calls in parallel
+    await Promise.all([
+      analyzeDetection(activeDataURL),
+      analyzeSceneContext(activeDataURL)
+    ]);
+  }
 
-    setHoverEntered(false);
-
-    let response = (await client
-      .getGenerativeModel(
-        {model: modelSelected},
-        {apiVersion: 'v1beta'}
-      )
-      .generateContent({
-        contents: [
-          {
-            role: "user",
-            parts: [
-              {text: is2d ? get2dPrompt() : prompt.join(" ")},
-              {inlineData: {
-                data: activeDataURL.replace("data:image/png;base64,", ""),
-                mimeType: "image/png"
-              }}
-            ]
-          }
-        ],
-        generationConfig: {temperature}
-      })).response.text()
-
-    if (response.includes("```json")) {
-      response = response.split("```json")[1].split("```")[0];
-    }
-    const parsedResponse = JSON.parse(response);
-    console.log('Parsed response:', parsedResponse);
-    
-    // Dispatch parsed response event
-    window.dispatchEvent(new CustomEvent('parsedResponse', { detail: parsedResponse }));
-
-    if (detectType === "2D bounding boxes") {
-      const formattedBoxes = parsedResponse.map(
-        (box: { box_2d: [number, number, number, number]; label: string }) => {
-          const [ymin, xmin, ymax, xmax] = box.box_2d;
-          return {
-            x: xmin / 1000,
-            y: ymin / 1000,
-            width: (xmax - xmin) / 1000,
-            height: (ymax - ymin) / 1000,
-            label: box.label,
-          };
-        },
-      );
-      setHoverEntered(false);
-      setBoundingBoxes2D(formattedBoxes);
-    } else if (detectType === "Points") {
-      const formattedPoints = parsedResponse.map(
-        (point: { point: [number, number]; label: string }) => {
-          return {
-            point: {
-              x: point.point[1] / 1000,
-              y: point.point[0] / 1000,
-            },
-            label: point.label,
-          };
-        },
-      );
-      setPoints(formattedPoints);
+  async function handleSend() {
+    if (isWebcam) {
+      if (isAnalyzing) {
+        setIsAnalyzing(false);
+        return;
+      }
+      setIsAnalyzing(true);
+      analyzeIntervalRef.current = window.setInterval(analyzeFrame, analyzeInterval * 1000) as unknown as number;
+      await analyzeFrame();
     } else {
-      const formattedBoxes = parsedResponse.map(
-        (box: {
-          box_3d: [
-            number,
-            number,
-            number,
-            number,
-            number,
-            number,
-            number,
-            number,
-            number,
-          ];
-          label: string;
-        }) => {
-          const center = box.box_3d.slice(0, 3);
-          const size = box.box_3d.slice(3, 6);
-          const rpy = box.box_3d
-            .slice(6)
-            .map((x: number) => (x * Math.PI) / 180);
-          return {
-            center,
-            size,
-            rpy,
-            label: box.label,
-          };
-        },
-      );
-      setBoundingBoxes3D(formattedBoxes);
+      await analyzeFrame();
     }
   }
 
   return (
     <div className="flex grow flex-col gap-3">
+      {sceneContext && (
+        <div className="bg-gray-50 rounded-lg p-3 text-sm">
+          <div className="font-medium mb-1">Scene Context:</div>
+          <div className="text-gray-600">{sceneContext.scene}</div>
+          <div className="font-medium mt-2 mb-1">Potential Task:</div>
+          <div className="text-gray-600">{sceneContext.task}</div>
+        </div>
+      )}
       <div className="flex justify-between items-center">
         <div className="uppercase">Prompt:</div>
         <label className="flex gap-2 select-none">
